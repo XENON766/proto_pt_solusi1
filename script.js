@@ -133,22 +133,64 @@ function loadEfficiencySettings() {
     const saved = localStorage.getItem('processEfficiencySettings');
     return saved ? JSON.parse(saved) : {...defaultEfficiencySettings};
 }
+// Save orders to MongoDB via backend API
+async function saveOrdersToDatabase() {
+  try {
+    const response = await fetch('/api?type=orders', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(orders) // Note: This will now refer to window.orders
+    });
 
-// Save efficiency settings to localStorage
-function saveEfficiencySettings() {
+    if (!response.ok) {
+      console.error('❌ Failed to save orders:', await response.text());
+      showAlert('Could not sync orders with server.', 'warning');
+    } else {
+      console.log('✅ Orders saved to MongoDB');
+    }
+  } catch (error) {
+    console.error('❌ Failed to save orders:', error);
+    showAlert('Could not sync orders with server.', 'warning');
+  }
+}
+
+// Save efficiency settings
+
+async function saveEfficiencySettings() {
     const settings = {};
     
     productionProcesses.forEach(process => {
         settings[process.id] = {
             name: process.name,
-            targetTime: parseFloat(document.getElementById(`time-${process.id}`).value) || defaultEfficiencySettings[process.id].targetTime,
-            targetQuality: parseFloat(document.getElementById(`quality-${process.id}`).value) || defaultEfficiencySettings[process.id].targetQuality,
-            targetOutput: parseFloat(document.getElementById(`output-${process.id}`).value) || defaultEfficiencySettings[process.id].targetOutput,
+            targetTime:
+                parseFloat(document.getElementById(`time-${process.id}`).value) ||
+                defaultEfficiencySettings[process.id].targetTime,
+            targetQuality:
+                parseFloat(document.getElementById(`quality-${process.id}`).value) ||
+                defaultEfficiencySettings[process.id].targetQuality,
+            targetOutput:
+                parseFloat(document.getElementById(`output-${process.id}`).value) ||
+                defaultEfficiencySettings[process.id].targetOutput,
             criteria: defaultEfficiencySettings[process.id].criteria
         };
     });
-    
+
+    // ✅ Save locally for instant use
     localStorage.setItem('processEfficiencySettings', JSON.stringify(settings));
+
+    // ✅ Also persist to MongoDB via backend API
+    try {
+    await fetch('/api?type=settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ efficiency: settings })
+    });
+    console.log('✅ Efficiency settings saved to MongoDB');
+    } catch (error) {
+    console.error('❌ Failed to save settings:', error);
+    showAlert('Failed to sync with server. Local copy saved only.', 'warning');
+    }
+
     showAlert('Efficiency settings saved successfully!', 'success');
     loadEfficiencyPage();
 }
@@ -364,9 +406,6 @@ function loadSavedLogo() {
 }
 
 // Project Management
-let projects = [];
-let projectIdCounter = 1;
-
 function openProjectModal(projectId = null) {
     const modal = document.getElementById('projectModal');
     const title = document.getElementById('project-modal-title');
@@ -421,77 +460,62 @@ function closeProjectModal() {
 // Handle form submission for create and update project
 document.getElementById('project-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-
     const formData = new FormData(e.target);
     const data = Object.fromEntries(formData);
     const projectId = document.getElementById('project-id').value;
 
+    // Disable submit button
+    const submitButton = document.getElementById('project-submit-button');
+    submitButton.disabled = true;
+    submitButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+
     try {
+        let payload;
         if (projectId) {
-            // Update existing project
-            const index = projects.findIndex(p => p.project_id === projectId);
-            if (index !== -1) {
-                projects[index] = {
-                    ...projects[index],
-                    project_name: data.project_name,
-                    project_description: data.project_description,
-                    start_date: data.start_date,
-                    end_date: data.end_date,
-                    client: data.client,
-                    project_manager: data.project_manager,
-                    status: data.status,
-                    notes: data.notes
-                };
-            }
-            showAlert('Project updated successfully', 'success');
+            // Editing: merge with existing data
+            const existingProject = projects.find(p => p.project_id === projectId);
+            payload = { ...existingProject, ...data, updated_at: new Date().toISOString() };
         } else {
-            // Create new project
-            const newProjectId = 'PRJ-' + String(projectIdCounter++).padStart(3, '0');
-            const newProject = {
-                project_id: newProjectId,
-                project_name: data.project_name,
-                project_description: data.project_description,
-                start_date: data.start_date,
-                end_date: data.end_date,
-                client: data.client,
-                project_manager: data.project_manager,
-                status: data.status,
-                notes: data.notes,
+            // Creating: create new payload
+            payload = {
+                ...data,
+                project_id: null, // API will generate
                 orders: [],
-                created_date: new Date().toISOString().split('T')[0]
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
             };
-            projects.push(newProject);
-            showAlert('Project created successfully', 'success');
         }
-        
+
+        if (typeof saveProjectAPI !== 'function') {
+            throw new Error('saveProjectAPI function is not defined. Check vercel.js');
+        }
+
+        await saveProjectAPI(payload); // This reloads all data
         closeProjectModal();
-        loadProjects();
-        updateProjectSelects();
+
     } catch (error) {
-        console.error('Error:', error);
-        showAlert(`Error ${projectId ? 'updating' : 'creating'} project`, 'error');
+        console.error('Error saving project:', error);
+        showAlert(`Failed to save project: ${error.message}`, 'error');
+    } finally {
+        submitButton.disabled = false;
+        const buttonText = projectId ? '<i class="fas fa-save"></i> Update Project' : '<i class="fas fa-plus"></i> Create Project';
+        submitButton.innerHTML = buttonText;
     }
 });
 
 // Delete Project
 async function deleteProject(projectId) {
-    if (confirm(`Are you sure you want to delete project ${projectId}?`)) {
+    if (confirm(`Are you sure you want to delete project ${projectId}? This is permanent.`)) {
         try {
-            // Remove project reference from orders
-            orders.forEach(order => {
-                if (order.project_id === projectId) {
-                    order.project_id = null;
-                }
-            });
-            
-            // Delete project
-            projects = projects.filter(p => p.project_id !== projectId);
-            showAlert('Project deleted successfully', 'success');
-            loadProjects();
-            updateProjectSelects();
+            if (typeof deleteProjectAPI !== 'function') {
+                throw new Error('deleteProjectAPI function is not defined. Check vercel.js');
+            }
+
+            await deleteProjectAPI(projectId); // This reloads all data
+
         } catch (error) {
-            console.error('Error:', error);
-            showAlert('Error deleting project', 'error');
+            console.error('Error deleting project:', error);
+            showAlert(`Error deleting project: ${error.message}`, 'error');
         }
     }
 }
@@ -500,11 +524,12 @@ async function deleteProject(projectId) {
 function loadProjects() {
     let html = '';
     
-    if (projects.length === 0) {
+    // Use window.projects and window.orders
+    if (!window.projects || window.projects.length === 0) {
         html = '<div style="text-align: center; padding: 40px; color: #6c757d;">No projects found. Create your first project to get started.</div>';
     } else {
-        projects.forEach(project => {
-            const projectOrders = orders.filter(o => o.project_id === project.project_id);
+        window.projects.forEach(project => {
+            const projectOrders = window.orders.filter(o => o.project_id === project.project_id);
             const totalQuantity = projectOrders.reduce((sum, order) => sum + order.quantity, 0);
             const completedQuantity = projectOrders.reduce((sum, order) => {
                 const warehouseOut = order.tracking.find(t => t.process === 'warehouse_out');
@@ -605,11 +630,14 @@ function loadProjects() {
 
 // Update project select options in forms
 function updateProjectSelects() {
+    // Use window.projects
+    const projectList = window.projects || [];
+    
     // Update order form project select
     const orderProjectSelect = document.getElementById('order-project-select');
     if (orderProjectSelect) {
         let html = '<option value="">-- No Project --</option>';
-        projects.filter(p => p.status !== 'completed').forEach(project => {
+        projectList.filter(p => p.status !== 'completed').forEach(project => {
             html += `<option value="${project.project_id}">${project.project_name} (${project.client})</option>`;
         });
         orderProjectSelect.innerHTML = html;
@@ -619,7 +647,7 @@ function updateProjectSelects() {
     const dssProjectSelect = document.getElementById('dss-project-select');
     if (dssProjectSelect) {
         let html = '<option value="">-- Select Project --</option>';
-        projects.forEach(project => {
+        projectList.forEach(project => {
             html += `<option value="${project.project_id}">${project.project_name} (${project.client})</option>`;
         });
         dssProjectSelect.innerHTML = html;
@@ -664,22 +692,18 @@ function exportToExcel(type) {
                 break;
         }
         
-        // Create workbook and export
         const wb = XLSX.utils.book_new();
         
-        if (Array.isArray(data)) {
-            // Multiple sheets
+        if (type === 'all') {
             data.forEach(sheet => {
                 const ws = XLSX.utils.json_to_sheet(sheet.data);
                 XLSX.utils.book_append_sheet(wb, ws, sheet.name);
             });
         } else {
-            // Single sheet
             const ws = XLSX.utils.json_to_sheet(data);
             XLSX.utils.book_append_sheet(wb, ws, 'Data');
         }
-        
-        // Export the file
+
         XLSX.writeFile(wb, filename);
         showAlert(`Data exported successfully as ${filename}`, 'success');
         closeExportModal();
@@ -692,8 +716,9 @@ function exportToExcel(type) {
 
 // Export projects data
 function exportProjectsData() {
-    return projects.map(project => {
-        const projectOrders = orders.filter(o => o.project_id === project.project_id);
+    // Use window.projects and window.orders
+    return (window.projects || []).map(project => {
+        const projectOrders = (window.orders || []).filter(o => o.project_id === project.project_id);
         const totalQuantity = projectOrders.reduce((sum, order) => sum + order.quantity, 0);
         const completedQuantity = projectOrders.reduce((sum, order) => {
             const warehouseOut = order.tracking.find(t => t.process === 'warehouse_out');
@@ -723,8 +748,9 @@ function exportProjectsData() {
 
 // Export orders data
 function exportOrdersData() {
-    return orders.map(order => {
-        const project = projects.find(p => p.project_id === order.project_id);
+    // Use window.orders and window.projects
+    return (window.orders || []).map(order => {
+        const project = (window.projects || []).find(p => p.project_id === order.project_id);
         return {
             'Order ID': order.order_id,
             'Customer': order.customer_name,
@@ -749,8 +775,9 @@ function exportOrdersData() {
 function exportTrackingData() {
     const trackingData = [];
     
-    orders.forEach(order => {
-        const project = projects.find(p => p.project_id === order.project_id);
+    // Use window.orders and window.projects
+    (window.orders || []).forEach(order => {
+        const project = (window.projects || []).find(p => p.project_id === order.project_id);
         order.tracking.forEach(track => {
             const process = productionProcesses.find(p => p.id === track.process);
             trackingData.push({
@@ -795,6 +822,10 @@ function exportEfficiencyData() {
 
 // Export all data
 function exportAllData() {
+    // Use window.orders and window.projects
+    const orderList = window.orders || [];
+    const projectList = window.projects || [];
+    
     return [
         {
             name: 'Orders',
@@ -816,104 +847,29 @@ function exportAllData() {
             name: 'Summary',
             data: [
                 {
-                    'Total Orders': orders.length,
-                    'Total Projects': projects.length,
-                    'Orders In Progress': orders.filter(o => o.current_status === 'in_progress').length,
-                    'Orders Completed': orders.filter(o => o.current_status === 'completed').length,
-                    'Projects In Progress': projects.filter(p => p.status === 'in_progress').length,
-                    'Projects Completed': projects.filter(p => p.status === 'completed').length,
-                    'Average Order Progress': `${(orders.reduce((sum, o) => sum + o.progress, 0) / orders.length).toFixed(1)}%`,
-                    'Average Order Risk Score': (orders.reduce((sum, o) => sum + o.risk_score, 0) / orders.length).toFixed(1),
-                    'Critical Orders': orders.filter(o => o.risk_level === 'CRITICAL').length
+                    'Total Orders': orderList.length,
+                    'Total Projects': projectList.length,
+                    'Orders In Progress': orderList.filter(o => o.current_status === 'in_progress').length,
+                    'Orders Completed': orderList.filter(o => o.current_status === 'completed').length,
+                    'Projects In Progress': projectList.filter(p => p.status === 'in_progress').length,
+                    'Projects Completed': projectList.filter(p => p.status === 'completed').length,
+                    'Average Order Progress': `${(orderList.reduce((sum, o) => sum + o.progress, 0) / orderList.length).toFixed(1)}%`,
+                    'Average Order Risk Score': (orderList.reduce((sum, o) => sum + o.risk_score, 0) / orderList.length).toFixed(1),
+                    'Critical Orders': orderList.filter(o => o.risk_level === 'CRITICAL').length
                 }
             ]
         }
     ];
 }
 
-// Sample data for demonstration
-let orders = [
-    {
-        order_id: 'ORD-001',
-        customer_name: 'PT Maju Jaya',
-        product_description: 'Meja Kerja Kayu',
-        quantity: 5,
-        order_date: '2023-10-01',
-        target_date: '2023-10-20',
-        pic_name: 'Budi Santoso',
-        current_status: 'in_progress',
-        notes: 'Prioritas tinggi',
-        requires_accessories: true,
-        requires_welding: false,
-        progress: 40,
-        risk_level: 'MEDIUM',
-        risk_score: 60,
-        project_id: 'PRJ-001',
-        priority: 'high',
-        tracking: [
-            { process: 'warehouse_in', status: 'completed', quantity_completed: 5, defect_quantity: 0, start_time: '2023-10-02T08:00', end_time: '2023-10-02T10:00', pic_name: 'Budi', last_updated: '2023-10-02T10:00' },
-            { process: 'sanding', status: 'completed', quantity_completed: 5, defect_quantity: 1, start_time: '2023-10-02T10:30', end_time: '2023-10-02T14:00', pic_name: 'Ahmad', last_updated: '2023-10-02T14:00' },
-            { process: 'assembly', status: 'in_progress', quantity_completed: 3, defect_quantity: 0, start_time: '2023-10-03T08:00', end_time: null, pic_name: 'Sari', last_updated: '2023-10-05T16:30' },
-            { process: 'coloring', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'accessories', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'welding', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'inspection', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'coating', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'packaging', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'warehouse_out', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null }
-        ]
-    },
-    {
-        order_id: 'ORD-002',
-        customer_name: 'CV Sejahtera',
-        product_description: 'Kursi Kantor',
-        quantity: 10,
-        order_date: '2023-10-05',
-        target_date: '2023-10-25',
-        pic_name: 'Siti Rahayu',
-        current_status: 'in_progress',
-        notes: 'Warna hitam doff',
-        requires_accessories: false,
-        requires_welding: true,
-        progress: 20,
-        risk_level: 'HIGH',
-        risk_score: 75,
-        project_id: 'PRJ-001',
-        priority: 'medium',
-        tracking: [
-            { process: 'warehouse_in', status: 'completed', quantity_completed: 10, defect_quantity: 0, start_time: '2023-10-06T08:00', end_time: '2023-10-06T09:30', pic_name: 'Budi', last_updated: '2023-10-06T09:30' },
-            { process: 'sanding', status: 'completed', quantity_completed: 10, defect_quantity: 0, start_time: '2023-10-06T10:00', end_time: '2023-10-06T15:00', pic_name: 'Ahmad', last_updated: '2023-10-06T15:00' },
-            { process: 'assembly', status: 'in_progress', quantity_completed: 2, defect_quantity: 0, start_time: '2023-10-09T08:00', end_time: null, pic_name: 'Sari', last_updated: '2023-10-10T12:00' },
-            { process: 'coloring', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'accessories', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'welding', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'inspection', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'coating', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'packaging', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null },
-            { process: 'warehouse_out', status: 'pending', quantity_completed: 0, defect_quantity: 0, start_time: null, end_time: null, pic_name: '', last_updated: null }
-        ]
-    }
-];
-
-// Initialize sample projects
-projects = [
-    {
-        project_id: 'PRJ-001',
-        project_name: 'Office Furniture Project',
-        project_description: 'Complete office furniture set for client',
-        start_date: '2023-10-01',
-        end_date: '2023-10-25',
-        client: 'PT Maju Jaya',
-        project_manager: 'Budi Santoso',
-        status: 'in_progress',
-        notes: 'High priority project',
-        created_date: '2023-10-01',
-        orders: ['ORD-001', 'ORD-002']
-    }
-];
-projectIdCounter = 2;
+// *** DELETED VARIABLE DECLARATIONS ***
+// `let orders = [];` was removed.
+// `projects = [...]` sample data was removed.
+// All functions will now correctly use `window.orders` and `window.projects`
+// which are populated by vercel.js
 
 // Chart instances
+// ** FIXED: Added all missing chart variables **
 let progressChart = null;
 let processEfficiencyChart = null;
 let riskTimelineChart = null;
@@ -922,6 +878,10 @@ let combinedEfficiencyChart = null;
 let bottleneckChart = null;
 let projectTimelineChart = null;
 let projectRiskChart = null;
+let processFlowChart = null;
+let projectProcessEfficiencyChart = null;
+let projectRiskDistributionChart = null;
+let orderProjectTimelineChart = null;
 
 // Improved Risk Assessment Function
 function calculateRiskAssessment(order) {
@@ -996,7 +956,7 @@ function calculateRiskAssessment(order) {
 
 // Project Risk Assessment Function
 function calculateProjectRiskAssessment(project) {
-    const projectOrders = orders.filter(o => o.project_id === project.project_id);
+    const projectOrders = (window.orders || []).filter(o => o.project_id === project.project_id);
     
     if (projectOrders.length === 0) {
         return {
@@ -1096,15 +1056,21 @@ function showDssTab(tabName) {
 }
 
 // Tab Management
-function showTab(tabName) {
+function showTab(tabName, event) {
     document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
     document.querySelectorAll('.nav-link').forEach(link => link.classList.remove('active'));
     
     document.getElementById(tabName).classList.add('active');
-    event.target.classList.add('active');
+    if (event) { // Add check for event, as it might be called programmatically
+        event.target.classList.add('active');
+    }
+
+    // Use window.orders and window.projects
+    const orderList = window.orders || [];
+    const projectList = window.projects || [];
 
     if (tabName === 'orders') {
-        loadOrders();
+        renderOrders(orderList); // Use the global list
     } else if (tabName === 'projects') {
         loadProjects();
     } else if (tabName === 'tracking') {
@@ -1122,20 +1088,24 @@ function showTab(tabName) {
 // Load Dashboard
 async function loadDashboard() {
     try {
+        // Use window.orders and window.projects
+        const orderList = window.orders || [];
+        const projectList = window.projects || [];
+
         // Update risk assessment for all orders
-        orders.forEach(order => {
+        orderList.forEach(order => {
             const riskAssessment = calculateRiskAssessment(order);
             order.risk_level = riskAssessment.risk_level;
             order.risk_score = riskAssessment.risk_score;
         });
 
         // Calculate KPIs
-        const totalOrders = orders.length;
-        const activeProjects = projects.filter(p => p.status === 'in_progress').length;
-        const completedOrders = orders.filter(o => o.current_status === 'completed').length;
-        const criticalOrders = orders.filter(o => o.risk_level === 'CRITICAL').length;
+        const totalOrders = orderList.length;
+        const activeProjects = projectList.filter(p => p.status === 'in_progress').length;
+        const completedOrders = orderList.filter(o => o.current_status === 'completed').length;
+        const criticalOrders = orderList.filter(o => o.risk_level === 'CRITICAL').length;
         
-        const avgProgress = orders.reduce((sum, order) => sum + order.progress, 0) / totalOrders;
+        const avgProgress = totalOrders > 0 ? orderList.reduce((sum, order) => sum + order.progress, 0) / totalOrders : 0;
         const avgLeadTime = 48; // This would come from actual data
         const defectRate = 2.5; // This would come from actual data
 
@@ -1149,10 +1119,10 @@ async function loadDashboard() {
 
         // Update risk orders table
         let riskHtml = '';
-        const atRiskOrders = orders.filter(o => o.risk_level === 'CRITICAL' || o.risk_level === 'HIGH');
+        const atRiskOrders = orderList.filter(o => o.risk_level === 'CRITICAL' || o.risk_level === 'HIGH');
         
         atRiskOrders.forEach(order => {
-            const project = projects.find(p => p.project_id === order.project_id);
+            const project = projectList.find(p => p.project_id === order.project_id);
             const riskColor = order.risk_level === 'CRITICAL' ? 'danger' : 
                             order.risk_level === 'HIGH' ? 'warning' : 
                             order.risk_level === 'MEDIUM' ? 'info' : 'success';
@@ -1197,11 +1167,11 @@ async function loadDashboard() {
 
 // Detect bottleneck in production
 function detectBottleneck() {
-    // This would normally analyze all orders to find the slowest process
-    // For demo purposes, we'll use a simple detection
+    // Use window.orders
+    const orderList = window.orders || [];
     const slowProcesses = {};
     
-    orders.forEach(order => {
+    orderList.forEach(order => {
         order.tracking.forEach(process => {
             if (process.start_time && process.end_time) {
                 const start = new Date(process.start_time);
@@ -1241,11 +1211,14 @@ function detectBottleneck() {
 }
 
 // Load Orders
-async function loadOrders() {
+function renderOrders(ordersToRender) {
     try {
         let html = '';
-        orders.forEach(order => {
-            const project = projects.find(p => p.project_id === order.project_id);
+        // Use window.projects
+        const projectList = window.projects || [];
+        
+        ordersToRender.forEach(order => {
+            const project = projectList.find(p => p.project_id === order.project_id);
             const statusColor = order.current_status === 'completed' ? 'success' : 
                                 order.current_status === 'in_progress' ? 'info' : 
                                 order.current_status === 'on_hold' ? 'warning' : 'accent';
@@ -1304,8 +1277,10 @@ async function loadOrders() {
 // Load Orders for Tracking
 async function loadOrdersForTracking() {
     try {
+        // Use window.orders
+        const orderList = window.orders || [];
         let html = '<option value="">-- Select Order --</option>';
-        orders.filter(o => o.current_status !== 'completed').forEach(order => {
+        orderList.filter(o => o.current_status !== 'completed').forEach(order => {
             html += `<option value="${order.order_id}">${order.order_id} - ${order.customer_name}</option>`;
         });
 
@@ -1319,8 +1294,10 @@ async function loadOrdersForTracking() {
 // Load Orders for DSS
 async function loadOrdersForDSS() {
     try {
+        // Use window.orders
+        const orderList = window.orders || [];
         let html = '<option value="">-- Select Order --</option>';
-        orders.forEach(order => {
+        orderList.forEach(order => {
             html += `<option value="${order.order_id}">${order.order_id} - ${order.customer_name}</option>`;
         });
 
@@ -1339,7 +1316,8 @@ function loadOrderTracking() {
         return;
     }
 
-    const order = orders.find(o => o.order_id === orderId);
+    // Use window.orders
+    const order = (window.orders || []).find(o => o.order_id === orderId);
     if (!order) return;
 
     document.getElementById('order-tracking-info').style.display = 'block';
@@ -1507,7 +1485,8 @@ async function analyzeOrder() {
     if (!orderId) return;
 
     try {
-        const order = orders.find(o => o.order_id === orderId);
+        // Use window.orders
+        const order = (window.orders || []).find(o => o.order_id === orderId);
         if (!order) return;
 
         // Update risk assessment
@@ -1605,10 +1584,11 @@ async function analyzeProject() {
     if (!projectId) return;
 
     try {
-        const project = projects.find(p => p.project_id === projectId);
+        // Use window.projects and window.orders
+        const project = (window.projects || []).find(p => p.project_id === projectId);
         if (!project) return;
 
-        const projectOrders = orders.filter(o => o.project_id === projectId);
+        const projectOrders = (window.orders || []).filter(o => o.project_id === projectId);
         
         // Update risk assessment for project
         const riskAssessment = calculateProjectRiskAssessment(project);
@@ -1898,17 +1878,21 @@ function generateProjectRecommendations(project, riskAssessment, projectOrders) 
 // Analyze All Orders (Combined Analysis)
 function analyzeAllOrders() {
     try {
+        // Use window.orders and window.projects
+        const orderList = window.orders || [];
+        const projectList = window.projects || [];
+
         // Calculate overall metrics
-        const totalOrders = orders.length;
-        const totalProjects = projects.length;
-        const completedOrders = orders.filter(o => o.current_status === 'completed').length;
-        const inProgressOrders = orders.filter(o => o.current_status === 'in_progress').length;
-        const pendingOrders = orders.filter(o => o.current_status === 'pending').length;
-        const completedProjects = projects.filter(p => p.status === 'completed').length;
-        const inProgressProjects = projects.filter(p => p.status === 'in_progress').length;
+        const totalOrders = orderList.length;
+        const totalProjects = projectList.length;
+        const completedOrders = orderList.filter(o => o.current_status === 'completed').length;
+        const inProgressOrders = orderList.filter(o => o.current_status === 'in_progress').length;
+        const pendingOrders = orderList.filter(o => o.current_status === 'pending').length;
+        const completedProjects = projectList.filter(p => p.status === 'completed').length;
+        const inProgressProjects = projectList.filter(p => p.status === 'in_progress').length;
         
-        const avgProgress = orders.reduce((sum, order) => sum + order.progress, 0) / totalOrders;
-        const avgRiskScore = orders.reduce((sum, order) => sum + order.risk_score, 0) / totalOrders;
+        const avgProgress = totalOrders > 0 ? orderList.reduce((sum, order) => sum + order.progress, 0) / totalOrders : 0;
+        const avgRiskScore = totalOrders > 0 ? orderList.reduce((sum, order) => sum + order.risk_score, 0) / totalOrders : 0;
         
         // Calculate process efficiency across all orders
         const processEfficiency = {};
@@ -1916,7 +1900,7 @@ function analyzeAllOrders() {
             let totalEfficiency = 0;
             let count = 0;
             
-            orders.forEach(order => {
+            orderList.forEach(order => {
                 const tracking = order.tracking.find(t => t.process === process.id);
                 if (tracking && tracking.start_time && tracking.end_time) {
                     const start = new Date(tracking.start_time);
@@ -1959,7 +1943,7 @@ function analyzeAllOrders() {
             very_low: 0
         };
         
-        projects.forEach(project => {
+        projectList.forEach(project => {
             const riskAssessment = calculateProjectRiskAssessment(project);
             projectRiskDistribution[riskAssessment.risk_level.toLowerCase().replace(' ', '_')]++;
         });
@@ -1984,7 +1968,7 @@ function analyzeAllOrders() {
                     <h4><i class="fas fa-exclamation-triangle"></i> Risk Overview</h4>
                     <div class="kpi-value" style="color: ${avgRiskScore > 70 ? 'var(--danger-color)' : avgRiskScore > 50 ? 'var(--warning-color)' : 'var(--success-color)'}">${avgRiskScore > 70 ? 'HIGH' : avgRiskScore > 50 ? 'MEDIUM' : 'LOW'}</div>
                     <div class="kpi-label">Overall Risk Level</div>
-                    <div class="kpi-label">Critical Orders: ${orders.filter(o => o.risk_level === 'CRITICAL').length}</div>
+                    <div class="kpi-label">Critical Orders: ${orderList.filter(o => o.risk_level === 'CRITICAL').length}</div>
                 </div>
             </div>
 
@@ -2042,12 +2026,14 @@ function analyzeAllOrders() {
 // Analyze bottlenecks across all orders
 function analyzeBottlenecks() {
     const processDelays = {};
+    // Use window.orders
+    const orderList = window.orders || [];
     
     productionProcesses.forEach(process => {
         let totalDelay = 0;
         let count = 0;
         
-        orders.forEach(order => {
+        orderList.forEach(order => {
             const tracking = order.tracking.find(t => t.process === process.id);
             if (tracking && tracking.start_time && tracking.end_time) {
                 const start = new Date(tracking.start_time);
@@ -2351,6 +2337,10 @@ function renderResourceAllocationChart(order) {
 function renderProcessFlowChart(order) {
     const ctx = document.getElementById('processFlowChart').getContext('2d');
     
+    if (processFlowChart) {
+        processFlowChart.destroy();
+    }
+    
     // Filter processes based on order requirements
     const applicableProcesses = productionProcesses.filter(process => {
         if (process.optional) {
@@ -2366,7 +2356,7 @@ function renderProcessFlowChart(order) {
         return (tracking.quantity_completed / order.quantity) * 100;
     });
     
-    new Chart(ctx, {
+    processFlowChart = new Chart(ctx, {
         type: 'bar',
         data: {
             labels: processLabels,
@@ -2693,11 +2683,11 @@ function renderProjectResourceChart(projectOrders) {
 function renderProjectRiskDistributionChart(riskDistribution) {
     const ctx = document.getElementById('projectRiskDistributionChart').getContext('2d');
     
-    if (projectRiskChart) {
-        projectRiskChart.destroy();
+    if (projectRiskDistributionChart) {
+        projectRiskDistributionChart.destroy();
     }
     
-    projectRiskChart = new Chart(ctx, {
+    projectRiskDistributionChart = new Chart(ctx, {
         type: 'pie',
         data: {
             labels: ['Critical', 'High', 'Medium', 'Low', 'Very Low'],
@@ -2741,11 +2731,19 @@ function renderProjectRiskDistributionChart(riskDistribution) {
 function renderOrderProjectTimelineChart() {
     const ctx = document.getElementById('orderProjectTimelineChart').getContext('2d');
     
+    if (orderProjectTimelineChart) {
+        orderProjectTimelineChart.destroy();
+    }
+    
+    // Use window.orders and window.projects
+    const orderList = window.orders || [];
+    const projectList = window.projects || [];
+    
     // Group orders by project
     const projectData = {};
     
-    projects.forEach(project => {
-        const projectOrders = orders.filter(o => o.project_id === project.project_id);
+    projectList.forEach(project => {
+        const projectOrders = orderList.filter(o => o.project_id === project.project_id);
         if (projectOrders.length > 0) {
             projectData[project.project_name] = {
                 totalOrders: projectOrders.length,
@@ -2756,7 +2754,7 @@ function renderOrderProjectTimelineChart() {
     });
     
     // Add orders without projects
-    const noProjectOrders = orders.filter(o => !o.project_id);
+    const noProjectOrders = orderList.filter(o => !o.project_id);
     if (noProjectOrders.length > 0) {
         projectData['No Project'] = {
             totalOrders: noProjectOrders.length,
@@ -2765,7 +2763,7 @@ function renderOrderProjectTimelineChart() {
         };
     }
     
-    new Chart(ctx, {
+    orderProjectTimelineChart = new Chart(ctx, {
         type: 'bar',
         data: {
             labels: Object.keys(projectData),
@@ -2803,20 +2801,23 @@ function renderOrderProjectTimelineChart() {
 
 // View Order Risk Details
 function viewOrderRisk(orderId) {
-    const order = orders.find(o => o.order_id === orderId);
+    // Use window.orders
+    const order = (window.orders || []).find(o => o.order_id === orderId);
     if (!order) return;
     
     const riskAssessment = calculateRiskAssessment(order);
     
     document.getElementById('dss-order-select').value = orderId;
-    showTab('dss');
+    // Programmatically switch tab
+    showTab('dss', document.querySelector('.nav-link[onclick*="showTab(\'dss\'"]'));
     analyzeOrder();
 }
 
 // Analyze Order Direct
 function analyzeOrderDirect(orderId) {
     document.getElementById('dss-order-select').value = orderId;
-    showTab('dss');
+    // Programmatically switch tab
+    showTab('dss', document.querySelector('.nav-link[onclick*="showTab(\'dss\'"]'));
     showDssTab('single');
     analyzeOrder();
 }
@@ -2835,7 +2836,8 @@ function openOrderModal(orderId = null) {
         submitButton.innerHTML = '<i class="fas fa-save"></i> Update Order';
         
         // Load order data
-        const order = orders.find(o => o.order_id === orderId);
+        // Use window.orders
+        const order = (window.orders || []).find(o => o.order_id === orderId);
         if (order) {
             document.getElementById('order-id').value = order.order_id;
             document.querySelector('input[name="customer_name"]').value = order.customer_name;
@@ -2881,79 +2883,59 @@ function closeOrderModal() {
 // Handle form submission for create and update
 document.getElementById('order-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-
     const formData = new FormData(e.target);
     const data = Object.fromEntries(formData);
     const orderId = document.getElementById('order-id').value;
 
+    // Add the extra boolean data and types
+    data.requires_accessories = document.getElementById('requires-accessories').checked;
+    data.requires_welding = document.getElementById('requires-welding').checked;
+    data.quantity = parseInt(data.quantity);
+    data.order_id = orderId || null; // Pass null if new, API will handle it
+
+    // Populate tracking for new orders
+    if (!orderId) {
+        data.tracking = productionProcesses.map(process => ({
+            process: process.id,
+            status: 'pending',
+            quantity_completed: 0,
+            defect_quantity: 0,
+            start_time: null, end_time: null, pic_name: '', issues: '', last_updated: null
+        }));
+    }
+
+    // Disable submit button
+    const submitButton = document.getElementById('submit-button');
+    submitButton.disabled = true;
+    submitButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+
     try {
-        if (orderId) {
-            // Update existing order
-            const index = orders.findIndex(o => o.order_id === orderId);
-            if (index !== -1) {
-                orders[index] = {
-                    ...orders[index],
-                    customer_name: data.customer_name,
-                    product_description: data.product_description,
-                    quantity: parseInt(data.quantity),
-                    order_date: data.order_date,
-                    target_date: data.target_date,
-                    project_id: data.project_id || null,
-                    pic_name: data.pic_name,
-                    priority: data.priority,
-                    notes: data.notes,
-                    requires_accessories: document.getElementById('requires-accessories').checked,
-                    requires_welding: document.getElementById('requires-welding').checked
-                };
-                
-                // Update risk assessment
-                const riskAssessment = calculateRiskAssessment(orders[index]);
-                orders[index].risk_level = riskAssessment.risk_level;
-                orders[index].risk_score = riskAssessment.risk_score;
-            }
-            showAlert('Order updated successfully', 'success');
-        } else {
-            // Create new order
-            const newOrderId = 'ORD-' + String(orders.length + 1).padStart(3, '0');
-            const newOrder = {
-                order_id: newOrderId,
-                customer_name: data.customer_name,
-                product_description: data.product_description,
-                quantity: parseInt(data.quantity),
-                order_date: data.order_date,
-                target_date: data.target_date,
-                project_id: data.project_id || null,
-                pic_name: data.pic_name,
-                current_status: 'pending',
-                priority: data.priority,
-                notes: data.notes,
-                requires_accessories: document.getElementById('requires-accessories').checked,
-                requires_welding: document.getElementById('requires-welding').checked,
-                progress: 0,
-                risk_level: 'LOW', // New orders start with LOW risk
-                risk_score: 10,    // New orders start with low risk score
-                tracking: productionProcesses.map(process => ({
-                    process: process.id,
-                    status: 'pending',
-                    quantity_completed: 0,
-                    defect_quantity: 0,
-                    start_time: null,
-                    end_time: null,
-                    pic_name: '',
-                    issues: '',
-                    last_updated: null
-                }))
-            };
-            orders.push(newOrder);
-            showAlert('Order created successfully', 'success');
+        // Call the saveOrder function from vercel.js
+        if (typeof saveOrder !== 'function') {
+            throw new Error('saveOrder function is not defined. Check vercel.js');
         }
-        
+
+        // We need to pass the *full* order object, not just form data
+        let payload = data;
+        if(orderId) {
+            // We are editing, merge with existing data
+            // Use window.orders
+            const existingOrder = (window.orders || []).find(o => o.order_id === orderId);
+            payload = { ...existingOrder, ...data };
+        }
+
+        await saveOrder(payload); // This function (from vercel.js) needs to handle reloading
+
         closeOrderModal();
-        loadOrders();
-        loadDashboard(); // Refresh dashboard to update risk metrics
+
     } catch (error) {
-        console.error('Error:', error);
-        showAlert(`Error ${orderId ? 'updating' : 'creating'} order`, 'error');
+        console.error('Error in form submission:', error);
+        showAlert(`Error saving order: ${error.message}`, 'error');
+    } finally {
+        // Re-enable submit button
+        submitButton.disabled = false;
+        const buttonText = orderId ? '<i class="fas fa-save"></i> Update Order' : '<i class="fas fa-plus"></i> Create Order';
+        submitButton.innerHTML = buttonText;
     }
 });
 
@@ -2961,18 +2943,26 @@ document.getElementById('order-form').addEventListener('submit', async (e) => {
 async function editOrder(orderId) {
     openOrderModal(orderId);
 }
-
 // Delete Order
 async function deleteOrder(orderId) {
-    if (confirm(`Are you sure you want to delete order ${orderId}?`)) {
+    if (confirm(`Are you sure you want to delete order ${orderId}? This is permanent.`)) {
         try {
-            orders = orders.filter(o => o.order_id !== orderId);
-            showAlert('Order deleted successfully', 'success');
-            loadOrders();
-            loadDashboard();
+            // Call the deleteOrderAPI function (which we need to add to vercel.js)
+            if (typeof deleteOrderAPI !== 'function') {
+                // Quick fix: add deleteOrderAPI to vercel.js if it's missing
+                // For now, let's just show an error.
+                // THIS IS THE FIX FROM THE PREVIOUS MESSAGE. 
+                // Make sure vercel.js has the deleteOrderAPI function
+                throw new Error('deleteOrderAPI function is not defined. Check vercel.js');
+            }
+
+            await deleteOrderAPI(orderId); // This function will handle reloading
+
+            // The reload logic is in deleteOrderAPI, no need to do it here.
+
         } catch (error) {
-            console.error('Error:', error);
-            showAlert('Error deleting order', 'error');
+            console.error('Error deleting order:', error);
+            showAlert(`Error deleting order: ${error.message}`, 'error');
         }
     }
 }
@@ -2987,7 +2977,8 @@ document.getElementById('tracking-form').addEventListener('submit', async (e) =>
     const data = Object.fromEntries(formData);
 
     try {
-        const order = orders.find(o => o.order_id === orderId);
+        // Use window.orders
+        const order = (window.orders || []).find(o => o.order_id === orderId);
         if (order) {
             const trackingIndex = order.tracking.findIndex(t => t.process === processId);
             if (trackingIndex !== -1) {
@@ -3021,10 +3012,17 @@ document.getElementById('tracking-form').addEventListener('submit', async (e) =>
 
                 // Update order status and progress
                 updateOrderStatus(order);
+                
+                // ** CRITICAL: Save the updated order back to the database **
+                // We need to save the *entire order* object
+                if (typeof saveOrder !== 'function') {
+                    throw new Error('saveOrder function is not defined. Check vercel.js');
+                }
+                await saveOrder(order); // This will save and reload the app
 
                 showAlert('Tracking updated successfully', 'success');
                 e.target.reset();
-                loadOrderTracking();
+                loadOrderTracking(); // This will run again after saveOrder reloads, which is fine
                 
                 // Refresh DSS analysis if we're on that tab
                 if (document.getElementById('dss').classList.contains('active')) {
@@ -3056,7 +3054,3 @@ function showAlert(message, type = 'info') {
 
     setTimeout(() => alert.remove(), 4000);
 }
-
-// Initialize
-loadDashboard();
-loadSavedLogo();

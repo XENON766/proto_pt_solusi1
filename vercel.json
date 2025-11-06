@@ -8,10 +8,8 @@
     { "src": "vercel.js", "use": "@vercel/static" }
   ],
   "routes": [
-    { "src": "/api/(.*)", "dest": "/api/index.js" },
-    { "src": "/styles.css", "dest": "/styles.css" },
-    { "src": "/script.js", "dest": "/script.js" },
-    { "src": "/vercel.js", "dest": "/vercel.js" },
-    { "src": "/", "dest": "/index.html" }
+      { "src": "/api", "dest": "/api/index.js" },
+      { "src": "/(.*)\\.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$", "dest": "/$1.$2" },
+      { "src": "/(.*)", "dest": "/index.html" }
   ]
 }
