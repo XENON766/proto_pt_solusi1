@@ -724,6 +724,25 @@ function exportProjectsData() {
             const warehouseOut = order.tracking.find(t => t.process === 'warehouse_out');
             return sum + (warehouseOut ? warehouseOut.quantity_completed : 0);
         }, 0);
+
+        let totalVolume = 0;
+        let inProcessVolume = 0;
+
+        projectOrders.forEach(order => {
+            const L = order.package_length || 0;
+            const W = order.package_width  || 0;
+            const H = order.package_height || 0;
+            const qty = order.quantity || 0;
+
+            const volume = (L * W * H) / 1000000; // convert cm³ → m³
+            const orderTotal = volume * qty;
+
+            totalVolume += orderTotal;
+
+            if (order.current_status !== 'completed') {
+                inProcessVolume += orderTotal;
+            }
+        });
         
         const progress = totalQuantity > 0 ? Math.round((completedQuantity / totalQuantity) * 100) : 0;
         
@@ -740,6 +759,8 @@ function exportProjectsData() {
             'Total Quantity': totalQuantity,
             'Completed Quantity': completedQuantity,
             'Progress': `${progress}%`,
+            'Total Volume (m³)': totalVolume.toFixed(3),
+            'In-Process Volume (m³)': inProcessVolume.toFixed(3),
             'Notes': project.notes || '',
             'Created Date': project.created_date
         };
@@ -1237,6 +1258,7 @@ function renderOrders(ordersToRender) {
                     <td>${order.customer_name}</td>
                     <td>${order.product_description}</td>
                     <td>${order.quantity}</td>
+                    <td>${((order.package_length * order.package_width * order.package_height) / 1000000).toFixed(3)}</td>
                     <td>${order.order_date}</td>
                     <td>${order.target_date}</td>
                     <td>${project ? project.project_name : 'None'}</td>
@@ -1599,7 +1621,27 @@ async function analyzeProject() {
             const warehouseOut = order.tracking.find(t => t.process === 'warehouse_out');
             return sum + (warehouseOut ? warehouseOut.quantity_completed : 0);
         }, 0);
-        
+
+        // Calculate rubrikasi volume
+        let totalVolume = 0;
+        let inProcessVolume = 0;
+
+        projectOrders.forEach(order => {
+            const L = order.package_length || 0;
+            const W = order.package_width  || 0;
+            const H = order.package_height || 0;
+            const qty = order.quantity || 0;
+
+            const volume = (L * W * H) / 1000000; // convert cm³ → m³
+            const orderTotal = volume * qty;
+
+            totalVolume += orderTotal;
+
+            if (order.current_status !== 'completed') {
+                inProcessVolume += orderTotal;
+            }
+        });
+                
         const completionRate = totalQuantity > 0 ? Math.round((completedQuantity / totalQuantity) * 100) : 0;
         
         // Calculate project timeline progress
@@ -1647,6 +1689,30 @@ async function analyzeProject() {
             processEfficiency[process.id] = count > 0 ? totalEfficiency / count : 0;
         });
 
+        // Compute total quantity & volume per workstation
+        const workstationTotals = {};
+
+        productionProcesses.forEach(proc => {
+            workstationTotals[proc.id] = {
+                qty: 0,
+                volume: 0
+            };
+        });
+
+        projectOrders.forEach(order => {
+            const L = order.package_length || 0;
+            const W = order.package_width  || 0;
+            const H = order.package_height || 0;
+            const volumePerUnit = (L * W * H) / 1000000;
+
+            order.tracking.forEach(tr => {
+                if (workstationTotals[tr.process]) {
+                    workstationTotals[tr.process].qty += tr.quantity_completed || 0;
+                    workstationTotals[tr.process].volume += (tr.quantity_completed || 0) * volumePerUnit;
+                }
+            });
+        });
+
         let html = `
             <div class="dss-grid">
                 <div class="dss-card risk">
@@ -1654,6 +1720,16 @@ async function analyzeProject() {
                     <div class="kpi-value" style="color: ${riskAssessment.risk_level === 'CRITICAL' ? 'var(--danger-color)' : riskAssessment.risk_level === 'HIGH' ? 'var(--warning-color)' : 'var(--info-color)'}">${riskAssessment.risk_level}</div>
                     <div class="kpi-label">Risk Score: ${riskAssessment.risk_score}/100</div>
                     <div class="kpi-label">Days Until Due: ${riskAssessment.days_until_due}</div>
+                </div>
+                <div class="dss-card">
+                    <h4><i class="fas fa-cube"></i> Total Volume (m³)</h4>
+                    <div class="kpi-value">${totalVolume.toFixed(3)}</div>
+                    <div class="kpi-label">Total cubic volume of all orders</div>
+                </div>
+                <div class="dss-card">
+                    <h4><i class="fas fa-box"></i> In-Process Volume (m³)</h4>
+                    <div class="kpi-value">${inProcessVolume.toFixed(3)}</div>
+                    <div class="kpi-label">Volume still in production</div>
                 </div>
                 <div class="dss-card forecast">
                     <h4><i class="fas fa-chart-pie"></i> Project Progress</h4>
@@ -1706,11 +1782,12 @@ async function analyzeProject() {
             </div>
         `;
 
+        projectOrders.forEach(order => { html += generateOrderSectionHTML(order); });
         document.getElementById('dss-project-results').innerHTML = html;
 
         // Render charts
         renderProjectTimelineChart(project, timelineProgress, completionRate);
-        renderProjectProcessEfficiencyChart(processEfficiency);
+        renderProjectProcessEfficiencyChart(workstationTotals);
         renderProjectRiskChart(riskAssessment.order_risks);
         renderProjectResourceChart(projectOrders);
 
@@ -1873,6 +1950,63 @@ function generateProjectRecommendations(project, riskAssessment, projectOrders) 
     }
     
     return recommendations;
+}
+
+// Generate the HTML for a single order breakdown inside project analysis
+function generateOrderSectionHTML(order) {
+    const orderVolume = ((order.package_length || 0) * (order.package_width || 0) * (order.package_height || 0)) / 1000000;
+    const volumePerUnit = orderVolume.toFixed(3);
+    const totalOrderVolume = (orderVolume * (order.quantity || 0)).toFixed(3);
+
+    // calculate per-workstation efficiencies using existing function
+    const processEff = updateEfficiencyCalculation(order); // returns { processId: efficiencyPercent, ... }
+
+    // Build efficiency list HTML
+    const effListHtml = Object.keys(processEff).map(pid => {
+        const proc = productionProcesses.find(p => p.id === pid);
+        const name = proc ? proc.name : pid;
+        const effVal = (processEff[pid] || 0).toFixed(1);
+        const badgeClass = processEff[pid] >= 80 ? 'badge-success' : processEff[pid] >= 50 ? 'badge-warning' : 'badge-danger';
+        return `<div class="pe-item"><div class="pe-name">${name}</div><div class="pe-value"><span class="badge ${badgeClass}">${effVal}%</span></div></div>`;
+    }).join('');
+
+    // compute timeline progress for the order (safe)
+    const start = order.order_date ? new Date(order.order_date) : null;
+    const end = order.target_date ? new Date(order.target_date) : null;
+    let orderTimeline = '-';
+    if (start && end) {
+        const totalDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) || 1;
+        const daysPassed = Math.ceil((Date.now() - start) / (1000 * 60 * 60 * 24));
+        orderTimeline = `${Math.min(100, Math.max(0, Math.round((daysPassed / totalDays) * 100)))}%`;
+    }
+
+    return `
+    <div class="order-breakdown-card">
+        <div class="order-breakdown-header">
+            <div class="order-title"><strong>${order.order_id}</strong> — ${order.product_description || 'Product'}</div>
+            <div class="order-meta">${order.customer_name || ''} • ${order.current_status || ''}</div>
+        </div>
+
+        <div class="order-breakdown-grid">
+            <div><strong>Quantity</strong><div>${order.quantity || 0}</div></div>
+            <div><strong>Volume / unit</strong><div>${volumePerUnit} m³</div></div>
+            <div><strong>Total Volume</strong><div>${totalOrderVolume} m³</div></div>
+            <div><strong>Progress</strong><div>${order.progress || 0}%</div></div>
+            <div><strong>Risk</strong><div>${order.risk_level || order.risk || 'N/A'}</div></div>
+            <div><strong>Timeline</strong><div>${orderTimeline}</div></div>
+        </div>
+
+        <div class="process-efficiency-section">
+            <h4>Process Efficiency (per workstation)</h4>
+            <div class="process-efficiency-list">
+                ${effListHtml || '<div style="color:#6c757d">No process data</div>'}
+            </div>
+        </div>
+
+        ${order.notes ? `<div class="order-notes"><strong>Notes</strong><p>${order.notes}</p></div>` : ''}
+    </div>
+    <hr class="order-sep">
+    `;
 }
 
 // Analyze All Orders (Combined Analysis)
@@ -2543,27 +2677,46 @@ function renderProjectTimelineChart(project, timelineProgress, completionRate) {
     });
 }
 
-function renderProjectProcessEfficiencyChart(efficiencyData) {
-    const ctx = document.getElementById('projectProcessEfficiencyChart').getContext('2d');
-    
-    if (projectProcessEfficiencyChart) {
-        projectProcessEfficiencyChart.destroy();
+function renderProjectProcessEfficiencyChart(workstationTotals) {
+    // ensure canvas exists
+    const canvas = document.getElementById('projectProcessEfficiencyChart');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+
+    // Use a global stored on window to avoid redeclaration errors
+    if (window.projectProcessEfficiencyChart) {
+        try { window.projectProcessEfficiencyChart.destroy(); } catch (e) { /* ignore destroy errors */ }
     }
-    
-    const processNames = productionProcesses.map(p => p.name);
-    const efficiencyValues = productionProcesses.map(p => efficiencyData[p.id] || 0);
-    
-    projectProcessEfficiencyChart = new Chart(ctx, {
+
+    const labels = Object.keys(workstationTotals).map(pid => {
+        const proc = productionProcesses.find(p => p.id === pid);
+        return proc ? proc.name : pid;
+    });
+
+    const qtyData = Object.values(workstationTotals).map(v => v.qty || 0);
+    const volumeData = Object.values(workstationTotals).map(v => Number((v.volume || 0).toFixed(3)));
+
+    window.projectProcessEfficiencyChart = new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: processNames,
-            datasets: [{
-                label: 'Efficiency (%)',
-                data: efficiencyValues,
-                backgroundColor: 'rgba(67, 97, 238, 0.7)',
-                borderColor: '#4361ee',
-                borderWidth: 1
-            }]
+            labels,
+            datasets: [
+                {
+                    label: 'Quantity Completed',
+                    data: qtyData,
+                    backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    borderWidth: 1
+                },
+                {
+                    label: 'Volume (m³)',
+                    data: volumeData,
+                    backgroundColor: 'rgba(255, 159, 64, 0.6)',
+                    borderColor: 'rgba(255, 159, 64, 1)',
+                    borderWidth: 1
+                }
+            ]
         },
         options: {
             responsive: true,
@@ -2571,10 +2724,19 @@ function renderProjectProcessEfficiencyChart(efficiencyData) {
             scales: {
                 y: {
                     beginAtZero: true,
-                    max: 100,
-                    ticks: {
-                        callback: function(value) {
-                            return value + '%';
+                    ticks: { font: { size: 12 } }
+                },
+                x: { ticks: { font: { size: 12 } } }
+            },
+            plugins: {
+                legend: { labels: { font: { size: 12 } } },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            if (context.dataset.label && context.dataset.label.includes('Volume')) {
+                                return `${context.dataset.label}: ${context.formattedValue} m³`;
+                            }
+                            return `${context.dataset.label}: ${context.formattedValue}`;
                         }
                     }
                 }
@@ -2849,6 +3011,9 @@ function openOrderModal(orderId = null) {
             document.querySelector('input[name="pic_name"]').value = order.pic_name;
             document.querySelector('select[name="priority"]').value = order.priority || 'medium';
             document.querySelector('textarea[name="notes"]').value = order.notes || '';
+            document.querySelector('input[name="package_length"]').value = order.package_length || 0;
+            document.querySelector('input[name="package_width"]').value  = order.package_width  || 0;
+            document.querySelector('input[name="package_height"]').value = order.package_height || 0;
             document.getElementById('requires-accessories').checked = order.requires_accessories || false;
             document.getElementById('requires-welding').checked = order.requires_welding || false;
         }
@@ -2886,6 +3051,10 @@ document.getElementById('order-form').addEventListener('submit', async (e) => {
     const formData = new FormData(e.target);
     const data = Object.fromEntries(formData);
     const orderId = document.getElementById('order-id').value;
+
+    data.package_length = parseFloat(data.package_length) || 0;
+    data.package_width  = parseFloat(data.package_width)  || 0;
+    data.package_height = parseFloat(data.package_height) || 0;
 
     // Add the extra boolean data and types
     data.requires_accessories = document.getElementById('requires-accessories').checked;
