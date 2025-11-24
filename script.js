@@ -128,6 +128,140 @@ const defaultEfficiencySettings = {
     }
 };
 
+// Login credentials
+async function performLogin() {
+    let username = document.getElementById("login-username").value;
+
+    // Remove whitespace anywhere
+    username = username.replace(/\s+/g, "");
+
+    // Auto-correct capitalization (Andi, Arif, Anto)
+    username = username.charAt(0).toUpperCase() + username.slice(1);
+
+    const password = document.getElementById("login-password").value.trim();
+
+    // Hash salted username
+    const userKey = await sha256("JC-USER-" + username);
+
+    const override = localStorage.getItem("jc_user_override_" + userKey);
+    const storedHash = override || USERS[userKey];
+
+    if (!storedHash) {
+        document.getElementById("login-error").style.display = "block";
+        return;
+    }
+
+    const passHash = await sha256(password);
+
+    if (passHash === storedHash) {
+        localStorage.setItem("jc_logged_in", "yes");
+        localStorage.setItem("jc_user", userKey);
+        document.getElementById("login-screen").style.display = "none";
+        document.getElementById("logout-btn").style.display = "inline-flex";
+    } else {
+        document.getElementById("login-error").style.display = "block";
+    }
+}
+
+function performLogout() {
+    localStorage.removeItem("jc_logged_in");
+    localStorage.removeItem("jc_user");
+    location.reload();
+}
+
+function checkLoginState() {
+    const logged = localStorage.getItem("jc_logged_in");
+    const userKey = localStorage.getItem("jc_user");
+
+    if (logged === "yes" && userKey) {
+        document.getElementById("login-screen").style.display = "none";
+        document.getElementById("logout-btn").style.display = "inline-flex";
+
+        if (typeof showLoggedInUser === "function") {
+            showLoggedInUser();
+        }
+    } else {
+        document.getElementById("login-screen").style.display = "flex";
+        document.getElementById("logout-btn").style.display = "none";
+    }
+}
+
+function showLoggedInUser() {
+    const userKey = localStorage.getItem("jc_user");
+    if (!userKey) return;
+
+    // You can show only hashed username or hide it completely.
+    const display = document.getElementById("user-display");
+    if (display) {
+        display.textContent = "User Active";
+    }
+}
+
+window.addEventListener("DOMContentLoaded", checkLoginState);
+
+// Change Password Logic
+function openChangePassword() {
+    document.getElementById("changePasswordModal").classList.add("active");
+}
+function closeChangePassword() {
+    document.getElementById("changePasswordModal").classList.remove("active");
+    document.getElementById("cp-error").style.display = "none";
+    document.getElementById("cp-success").style.display = "none";
+}
+
+async function changePassword() {
+    const current = document.getElementById("cp-current").value;
+    const newPass = document.getElementById("cp-new").value;
+    const confirm = document.getElementById("cp-confirm").value;
+
+    const errorBox = document.getElementById("cp-error");
+    const successBox = document.getElementById("cp-success");
+
+    errorBox.style.display = "none";
+    successBox.style.display = "none";
+
+    const userKey = localStorage.getItem("jc_user");
+
+    const override = localStorage.getItem("jc_user_override_" + userKey);
+    const storedHash = override || USERS[userKey];
+
+    const currentHash = await sha256(current);
+
+    if (currentHash !== storedHash) {
+        errorBox.innerText = "Current password is incorrect.";
+        errorBox.style.display = "block";
+        return;
+    }
+
+    if (newPass !== confirm) {
+        errorBox.innerText = "New password does not match.";
+        errorBox.style.display = "block";
+        return;
+    }
+
+    const newHash = await sha256(newPass);
+
+    localStorage.setItem("jc_user_override_" + userKey, newHash);
+
+    successBox.innerText = "Password updated successfully.";
+    successBox.style.display = "block";
+}
+
+// Encrypt password
+async function sha256(text) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(text);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+const USERS = {
+    "fb6625bc989ff1b47976d979f31b21c8a8e4643f7493c11e81c3f4d47f0b257a": "779c3dbb3c8019cbf34123832f1f9cb79d4887c4cb7fe0173bb471ca1772ba20",
+    "07fe8421423975c4b020801e713c688b6b536d48f9d2647483415ee1d3be3102": "dfd168e723b86030c7f1ed182dd3a0a9943eac09da3874a23eccb6fe8067b758",
+    "ed75549e52d29f036d351298bf85af2a7ddb51dcdf94bfa0e139dc2a871cee28": "924246f9b1b601f3ec1c7ca28d3499e7d10e9d22f5fd16fd925191dbd1ec3018"
+};
+
 // Load efficiency settings from localStorage
 function loadEfficiencySettings() {
     const saved = localStorage.getItem('processEfficiencySettings');
